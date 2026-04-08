@@ -111,51 +111,73 @@ def _wrap_words(c: canvas.Canvas, text: str, max_width_pt: float, font: str, siz
     return lines
 
 
-def _draw_centered_name(
-    c: canvas.Canvas,
-    *,
-    text: str,
-    x_left: float,
-    y_top: float,
-    width: float,
-    font: str,
-    max_lines: int = 2,
-    max_size: int = 8,
-    min_size: int = 5,
-    line_gap: float = 0.6 * mm,
-) -> float:
-    """
-    Draw product name centered. Try 1-2 lines and shrink font to fit width.
-    Returns total height used (pt).
-    """
-    clean = " ".join((text or "").split())
+def _looks_like_variant_token(word: str) -> bool:
+    w = (word or "").strip().lower()
+    if not w:
+        return False
+    # common patterns like "2mx2m25", "2m", "10x20", etc.
+    if "mx" in w or "x" in w:
+        has_digit = any(ch.isdigit() for ch in w)
+        return has_digit
+    return False
+
+
+def _looks_like_count_phrase(w1: str, w2: str) -> bool:
+    a = (w1 or "").strip()
+    b = (w2 or "").strip()
+    if not a or not b:
+        return False
+    if not a.isdigit():
+        return False
+    # second token likely Vietnamese word like "lớp", "cái", "cuộn"...
+    return any(ch.isalpha() for ch in b)
+
+
+def _split_name_lines(c: canvas.Canvas, name: str, max_width_pt: float, font: str, size: int) -> list[str]:
+    clean = " ".join((name or "").split())
     if not clean:
-        return 0.0
+        return []
 
-    for size in range(max_size, min_size - 1, -1):
-        c.setFont(font, size)
-        lines = _wrap_words(c, clean, width, font, size)
-        if not lines:
-            continue
-        lines = lines[:max_lines]
-        # If we had to cut to max_lines, try to at least fit last line with ellipsis
-        if len(lines) == max_lines and " ".join(lines) != clean:
-            lines[-1] = _fit_text(c, lines[-1], width, font, size)
+    words = clean.split(" ")
 
-        if all(c.stringWidth(ln, font, size) <= width for ln in lines):
-            total_h = len(lines) * size + (len(lines) - 1) * line_gap
-            # draw from top down
-            y = y_top - size
-            for ln in lines:
-                c.drawCentredString(x_left + width / 2, y, ln)
-                y -= (size + line_gap)
-            return total_h
+    # Rule A: "1 lớp 1mx0,7m Caro Nâu" => ["1 lớp", "1mx0,7m", "Caro Nâu"]
+    if len(words) >= 4 and _looks_like_count_phrase(words[0], words[1]) and _looks_like_variant_token(words[2]):
+        l1 = " ".join(words[:2])
+        l2 = words[2]
+        l3 = " ".join(words[3:])
+        return [
+            _fit_text(c, l1, max_width_pt, font, size),
+            _fit_text(c, l2, max_width_pt, font, size),
+            _fit_text(c, l3, max_width_pt, font, size),
+        ]
 
-    # Fallback: single line truncated
-    size = min_size
-    c.setFont(font, size)
-    c.drawCentredString(x_left + width / 2, y_top - size, _fit_text(c, clean, width, font, size))
-    return size
+    # Rule B: "Rido 2mx2m25 Vương Miệng" or "Ore 10x20 ABC" => ["Rido", "2mx2m25", "Vương Miệng"]
+    # (Chuẩn hóa giống format "1 lớp")
+    if len(words) >= 3 and _looks_like_variant_token(words[1]):
+        l1 = words[0]
+        l2 = words[1]
+        l3 = " ".join(words[2:])
+        return [
+            _fit_text(c, l1, max_width_pt, font, size),
+            _fit_text(c, l2, max_width_pt, font, size),
+            _fit_text(c, l3, max_width_pt, font, size),
+        ]
+
+    # Otherwise: wrap and take first 2 lines
+    wrapped = _wrap_words(c, clean, max_width_pt, font, size)
+    if not wrapped:
+        return []
+    # Keep up to 3 lines for name; compress remainder into last line with ellipsis if needed.
+    if len(wrapped) <= 3:
+        return [ln for ln in wrapped if ln]
+    l1 = wrapped[0]
+    l2 = wrapped[1]
+    l3 = " ".join(wrapped[2:])
+    return [
+        _fit_text(c, l1, max_width_pt, font, size),
+        _fit_text(c, l2, max_width_pt, font, size),
+        _fit_text(c, l3, max_width_pt, font, size),
+    ]
 
 
 def generate_labels_pdf(
@@ -168,7 +190,7 @@ def generate_labels_pdf(
 ) -> None:
     """
     1 page = 1 tem 72x22mm.
-    two_up=True: chia đôi chiều ngang, in 2 tem giống nhau trên cùng 1 tem (trái/phải).
+    two_up=True: chia đôi chiều ngang, in 2 tem trên cùng 1 trang (trái/phải).
     """
     page_w = page_w_mm * mm
     page_h = page_h_mm * mm
@@ -184,58 +206,88 @@ def generate_labels_pdf(
 
     name_font, sku_font = _ensure_vietnamese_font()
 
-    for row in rows:
+    def draw_one(label: LabelRow, *, x0: float, y0: float) -> None:
+        # Layout: QR left, text right (tối đa 3 dòng name + 1 dòng sku)
+        inner_h = page_h - 2 * pad_y
+        qr_size = min(18.0 * mm, inner_h)  # square
+        inner_y = y0
+
+        qr_x = x0
+        qr_y = inner_y + (inner_h - qr_size) / 2
+
+        text_gap = 1.2 * mm
+        text_x = qr_x + qr_size + text_gap
+        text_w = max(1.0 * mm, col_w - qr_size - text_gap)
+
+        # QR image (left)
+        img_bytes = _qr_png_bytes(label.sku)
+        img = Image.open(BytesIO(img_bytes))
+        img_w, img_h = img.size
+        img_reader = ImageReader(img)
+
+        scale = min(qr_size / img_w, qr_size / img_h)
+        draw_w = img_w * scale
+        draw_h = img_h * scale
+        c.drawImage(
+            img_reader,
+            qr_x + (qr_size - draw_w) / 2,
+            qr_y + (qr_size - draw_h) / 2,
+            width=draw_w,
+            height=draw_h,
+            preserveAspectRatio=True,
+            mask="auto",
+        )
+
+        base_size = 7
+        min_size = 4
+        line_gap = 0.6 * mm
+
+        for size in range(base_size, min_size - 1, -1):
+            name_lines = _split_name_lines(c, label.name, text_w, name_font, size)
+            name_lines = [ln for ln in name_lines if ln][:3]
+            if not name_lines:
+                name_lines = [""]
+
+            sku_line = _fit_text(c, label.sku, text_w, sku_font, size)
+            lines = name_lines + [sku_line]
+
+            total_h = len(lines) * size + (len(lines) - 1) * line_gap
+            if total_h <= inner_h + 0.1:
+                y_top = inner_y + inner_h - (inner_h - total_h) / 2
+                y = y_top - size
+
+                c.setFont(name_font, size)
+                for ln in name_lines:
+                    c.drawString(text_x, y, ln)
+                    y -= (size + line_gap)
+
+                c.setFont(sku_font, size)
+                c.drawString(text_x, y, sku_line)
+                break
+
+    rows_list = list(rows)
+    i = 0
+    while i < len(rows_list):
         c.setFillColorRGB(0, 0, 0)
 
-        for col in range(col_count):
-            x0 = pad_x + col * (col_w + gap)
+        if two_up:
+            left = rows_list[i]
+            right = rows_list[i + 1] if (i + 1) < len(rows_list) else None
+
+            x_left = pad_x
             y0 = pad_y
+            draw_one(left, x0=x_left, y0=y0)
 
-            # Name (top) - centered, wrap/shrink to show full as much as possible
-            name_top = page_h - y0
-            name_used_h = _draw_centered_name(
-                c,
-                text=row.name,
-                x_left=x0,
-                y_top=name_top,
-                width=col_w,
-                font=name_font,
-                max_lines=2,
-                max_size=8,
-                min_size=5,
-            )
+            if right is not None:
+                x_right = pad_x + (col_w + gap)
+                draw_one(right, x0=x_right, y0=y0)
 
-            # QR image (middle)
-            img_bytes = _qr_png_bytes(row.sku)
-            img = Image.open(BytesIO(img_bytes))
-            img_w, img_h = img.size
-            img_reader = ImageReader(img)
-
-            # Allocate square-ish area for QR
-            qr_h = 13.0 * mm
-            qr_y = page_h - y0 - name_used_h - (1.2 * mm) - qr_h
-            qr_w = col_w
-
-            # Keep aspect ratio, fit within qr_w x qr_h
-            scale = min(qr_w / img_w, qr_h / img_h)
-            draw_w = img_w * scale
-            draw_h = img_h * scale
-            c.drawImage(
-                img_reader,
-                x0 + (qr_w - draw_w) / 2,
-                qr_y + (qr_h - draw_h) / 2,
-                width=draw_w,
-                height=draw_h,
-                preserveAspectRatio=True,
-                mask="auto",
-            )
-
-            # SKU text (bottom)
-            sku_size = 7
-            c.setFont(sku_font, sku_size)
-            sku_y = y0 + 0.5 * mm
-            sku_text = _fit_text(c, row.sku, col_w, sku_font, sku_size)
-            c.drawCentredString(x0 + col_w / 2, sku_y, sku_text)
+            i += 2
+        else:
+            x0 = pad_x
+            y0 = pad_y
+            draw_one(rows_list[i], x0=x0, y0=y0)
+            i += 1
 
         c.showPage()
 
