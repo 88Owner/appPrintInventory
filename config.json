@@ -1,0 +1,34 @@
+{
+  "base_url": "https://tinhtra.mysapo.net",
+  "token_primary": "002d591935e245e5ba9993e20b9c60e3",
+  "token_secondary": "b10296a85d6f4ca99ad8b699192937db",
+  "timeout_seconds": 30,
+  "auth_strategies": [
+    {
+      "name": "x-sapo-access-token",
+      "headers": {
+        "X-Sapo-Access-Token": "002d591935e245e5ba9993e20b9c60e3"
+      }
+    },
+    {
+      "name": "authorization-bearer",
+      "headers": {
+        "Authorization": "Bearer 002d591935e245e5ba9993e20b9c60e3"
+      }
+    },
+    {
+      "name": "two-tokens-headers",
+      "headers": {
+        "X-Sapo-Access-Token": "002d591935e245e5ba9993e20b9c60e3",
+        "X-Sapo-SessionId": "b10296a85d6f4ca99ad8b699192937db"
+      }
+    },
+    {
+      "name": "two-tokens-cookie",
+      "headers": {
+        "X-Sapo-Access-Token": "002d591935e245e5ba9993e20b9c60e3",
+        "Cookie": "session_id=b10296a85d6f4ca99ad8b699192937db"
+      }
+    }
+  ]
+}
