@@ -250,6 +250,7 @@ class SapoClient:
     def get_receive_inventory(self, marec: str) -> tuple[list[ReceiveInventoryItem], str, str]:
         """
         Trả về: (danh_sách_dòng, auth_strategy, url_đã_gọi).
+        Không lọc theo receipt_status — mọi phiếu có id/mã hợp lệ đều đọc được chi tiết.
         url_đã_gọi dùng để hiển thị trên UI (GET .../admin/receive_inventories/{id}.json).
         """
         marec = marec.strip()
@@ -282,17 +283,18 @@ class SapoClient:
 
         raise SapoApiError(f"HTTP {resp.status_code}: {resp.text[:800]}")
 
-    def list_pending_receive_inventories(self) -> tuple[list[ReceiveInventorySummary], str, str]:
+    def list_received_receive_inventories(self) -> tuple[list[ReceiveInventorySummary], str, str]:
         """
-        Lấy các phiếu có receipt_status == pending (lọc phía client nếu API trả trộn).
+        Danh sách đầy đủ trên app: chỉ phiếu có receipt_status == received
+        (thử query receipt_status=received; nếu API không lọc thì lọc phía client).
         Trả về: (danh_sách, auth_strategy, url_gốc).
         """
         path = "/admin/receive_inventories.json"
         base_url = f"{self._cfg.base_url}{path}"
 
         param_variants: list[dict[str, Any]] = [
-            {"limit": 250, "page": 1, "receipt_status": "pending"},
-            {"limit": 250, "page": 1, "status": "pending"},
+            {"limit": 250, "page": 1, "receipt_status": "received"},
+            {"limit": 250, "page": 1, "status": "received"},
             {"limit": 250, "page": 1},
         ]
 
@@ -328,7 +330,7 @@ class SapoClient:
                 summ = _summary_from_row(obj)
                 if summ is None:
                     continue
-                if str(summ.receipt_status).strip().lower() != "pending":
+                if str(summ.receipt_status).strip().lower() != "received":
                     continue
                 merged[summ.id] = summ
             if len(raw) < limit:

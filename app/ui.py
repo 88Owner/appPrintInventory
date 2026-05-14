@@ -45,7 +45,7 @@ def _rid_from_detail_url(url: str) -> int | None:
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("In tem 72x22 - Receive Inventories (pending)")
+        self.setWindowTitle("In tem 72x22 - Receive Inventories (đã nhận)")
         self.resize(1100, 720)
 
         cfg_path = default_config_path()
@@ -137,18 +137,21 @@ class MainWindow(QMainWindow):
 
         self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.setToolTip(
-            "Tải lại danh sách receive_inventories (pending) từ API — dữ liệu mới nhất. Phím tắt: F5"
+            "Tải lại danh sách receive_inventories đã nhận (receipt_status = received). Phím tắt: F5"
         )
         self.refresh_btn.clicked.connect(self.refresh_pending_list)
         top.addWidget(self.refresh_btn)
 
         self.refresh_in_group_btn = QPushButton("Refresh")
-        self.refresh_in_group_btn.setToolTip("Tải lại danh sách phiếu pending từ API (giữ nút gần bảng)")
+        self.refresh_in_group_btn.setToolTip("Tải lại danh sách phiếu đã nhận (received) từ API")
         self.refresh_in_group_btn.clicked.connect(self.refresh_pending_list)
 
         top.addWidget(QLabel("Mã / ID nhanh:"))
         self.code_input = QLineEdit()
-        self.code_input.setPlaceholderText("Mở chi tiết 1 phiếu (ID hoặc REI…)")
+        self.code_input.setPlaceholderText("Mở chi tiết 1 phiếu (ID hoặc REI…) — không lọc theo trạng thái")
+        self.code_input.setToolTip(
+            "Gọi GET /admin/receive_inventories/{id|mã}.json — mọi trạng thái receipt_status đều được."
+        )
         self.code_input.returnPressed.connect(self.on_fetch_one)
         top.addWidget(self.code_input, 1)
 
@@ -165,10 +168,10 @@ class MainWindow(QMainWindow):
         splitter = QSplitter(Qt.Vertical)
         layout.addWidget(splitter, 1)
 
-        grp_pending = QGroupBox("Phiếu nhập chờ xử lý")
+        grp_pending = QGroupBox("Phiếu đã nhận hàng (receipt_status = received)")
         gl = QVBoxLayout(grp_pending)
         pending_hdr = QHBoxLayout()
-        pending_hdr.addWidget(QLabel("Danh sách từ API (có thể bấm Refresh để cập nhật)"))
+        pending_hdr.addWidget(QLabel("Chỉ phiếu đã nhận (received). Ô Mã/ID nhanh: mọi trạng thái."))
         pending_hdr.addStretch(1)
         pending_hdr.addWidget(self.refresh_in_group_btn)
         gl.addLayout(pending_hdr)
@@ -269,10 +272,10 @@ class MainWindow(QMainWindow):
 
     def refresh_pending_list(self) -> None:
         self._set_refresh_enabled(False)
-        self.status_lbl.setText("Đang tải danh sách phiếu pending…")
+        self.status_lbl.setText("Đang tải danh sách phiếu đã nhận (received)…")
         QApplication.processEvents()
         try:
-            rows, strategy, base_url = self._client.list_pending_receive_inventories()
+            rows, strategy, base_url = self._client.list_received_receive_inventories()
             # Dữ liệu mới: bỏ cache chi tiết, tick in, và bảng chi tiết cũ
             self._detail_cache.clear()
             self._line_prefs.clear()
@@ -284,7 +287,7 @@ class MainWindow(QMainWindow):
             self._pending_summaries = rows
             self._fill_pending_table()
             self.status_lbl.setText(
-                f"Đã tải {len(rows)} phiếu pending."
+                f"Đã tải {len(rows)} phiếu đã nhận (received)."
             )
         except Exception as e:
             self.status_lbl.setText("Lỗi tải danh sách.")
@@ -425,8 +428,8 @@ class MainWindow(QMainWindow):
             if not found:
                 QMessageBox.information(
                     self,
-                    "Phiếu không nằm trong danh sách pending",
-                    "Chi tiết vẫn hiển thị bên dưới. Phiếu này có thể không còn trạng thái pending.",
+                    "Phiếu không nằm trong danh sách đã nhận",
+                    "Chi tiết vẫn hiển thị bên dưới. Phiếu này có thể chưa received hoặc không còn trong danh sách lọc.",
                 )
         except Exception as e:
             self.status_lbl.setText("Lỗi.")
