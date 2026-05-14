@@ -19,6 +19,16 @@ class ReceiveInventoryItem:
     quantity: int
 
 
+@dataclass(frozen=True)
+class ReceiveInventorySummary:
+    """Một dòng trong danh sách GET /admin/receive_inventories.json"""
+
+    id: int
+    code: str
+    receipt_status: str
+    created_on: str
+
+
 def _extract_receive_inventory_id(payload: Any) -> int | None:
     if isinstance(payload, dict):
         ri = payload.get("receive_inventory")
@@ -171,7 +181,7 @@ class SapoClient:
         }
         return self._session.get(url, headers=headers, auth=auth, params=params, timeout=self._cfg.timeout_seconds)
 
-    def _attempt_get(self, path: str) -> tuple[requests.Response, str]:
+    def _attempt_get(self, path: str, params: dict[str, Any] | None = None) -> tuple[requests.Response, str]:
         """
         Try BasicAuth first (because Postman screenshot uses it),
         then fall back to header strategies.
@@ -180,14 +190,14 @@ class SapoClient:
 
         if self._cfg.token_primary and self._cfg.token_secondary:
             try:
-                resp = self._get(path, auth=(self._cfg.token_primary, self._cfg.token_secondary))
+                resp = self._get(path, auth=(self._cfg.token_primary, self._cfg.token_secondary), params=params)
                 return resp, "basic-auth"
             except Exception as e:
                 last_exc = e
 
         for s in self._cfg.auth_strategies:
             try:
-                resp = self._get(path, strategy=s)
+                resp = self._get(path, strategy=s, params=params)
                 return resp, s.name
             except Exception as e:
                 last_exc = e
@@ -256,7 +266,7 @@ class SapoClient:
         path = f"/admin/receive_inventories/{id_or_raw}.json"
         full_url = f"{self._cfg.base_url}{path}"
 
-        resp, strat = self._attempt_get(path)
+        resp, strat = self._attempt_get(path, params=None)
         if resp.status_code == 200:
             payload = resp.json()
             items = _extract_items(payload)
@@ -271,6 +281,108 @@ class SapoClient:
             return items, strat, full_url
 
         raise SapoApiError(f"HTTP {resp.status_code}: {resp.text[:800]}")
+
+    def list_pending_receive_inventories(self) -> tuple[list[ReceiveInventorySummary], str, str]:
+        """
+        Lấy các phiếu có receipt_status == pending (lọc phía client nếu API trả trộn).
+        Trả về: (danh_sách, auth_strategy, url_gốc).
+        """
+        path = "/admin/receive_inventories.json"
+        base_url = f"{self._cfg.base_url}{path}"
+
+        param_variants: list[dict[str, Any]] = [
+            {"limit": 250, "page": 1, "receipt_status": "pending"},
+            {"limit": 250, "page": 1, "status": "pending"},
+            {"limit": 250, "page": 1},
+        ]
+
+        working_params: dict[str, Any] | None = None
+        strategy = ""
+
+        for p0 in param_variants:
+            resp, strat = self._attempt_get(path, params=p0)
+            strategy = strat
+            if resp.status_code != 200:
+                continue
+            resp.json()  # validate JSON
+            working_params = dict(p0)
+            break
+
+        if working_params is None:
+            raise SapoApiError(f"Không đọc được danh sách receive_inventories từ {base_url}")
+
+        merged: dict[int, ReceiveInventorySummary] = {}
+        page = 1
+        limit = int(working_params.get("limit", 250))
+
+        while page < 500:
+            params = {**working_params, "page": page, "limit": limit}
+            resp, strategy = self._attempt_get(path, params=params)
+            if resp.status_code != 200:
+                raise SapoApiError(f"HTTP {resp.status_code} khi đọc trang {page}: {resp.text[:500]}")
+            payload = resp.json()
+            raw = _iter_receive_inventory_list_dicts(payload)
+            if not raw:
+                break
+            for obj in raw:
+                summ = _summary_from_row(obj)
+                if summ is None:
+                    continue
+                if str(summ.receipt_status).strip().lower() != "pending":
+                    continue
+                merged[summ.id] = summ
+            if len(raw) < limit:
+                break
+            page += 1
+
+        items = sorted(merged.values(), key=lambda s: s.id, reverse=True)
+        return items, strategy, base_url
+
+
+def _iter_receive_inventory_list_dicts(payload: Any) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    if isinstance(payload, list):
+        for it in payload:
+            if isinstance(it, dict):
+                rows.append(it)
+        return rows
+    if not isinstance(payload, dict):
+        return rows
+    for k in ("receive_inventories", "items", "data", "receive_inventory"):
+        v = payload.get(k)
+        if isinstance(v, list):
+            for it in v:
+                if isinstance(it, dict):
+                    rows.append(it)
+            if rows:
+                return rows
+    for v in payload.values():
+        if isinstance(v, list) and v and isinstance(v[0], dict):
+            for it in v:
+                if isinstance(it, dict):
+                    rows.append(it)
+            if rows:
+                return rows
+    return rows
+
+
+def _unwrap_receive_row(obj: dict[str, Any]) -> dict[str, Any]:
+    inner = obj.get("receive_inventory")
+    if isinstance(inner, dict):
+        merged = {**inner, **{k: v for k, v in obj.items() if k != "receive_inventory"}}
+        return merged
+    return obj
+
+
+def _summary_from_row(obj: dict[str, Any]) -> ReceiveInventorySummary | None:
+    d = _unwrap_receive_row(obj)
+    rid = _as_int(d.get("id"))
+    if rid is None:
+        return None
+    code = str(d.get("code") or "").strip()
+    st = str(d.get("receipt_status") or d.get("status") or "").strip()
+    created = str(d.get("created_on") or d.get("created_at") or d.get("updated_on") or "").strip()
+    return ReceiveInventorySummary(id=rid, code=code, receipt_status=st, created_on=created)
 
 
 def _find_id_in_list_payload(payload: Any, code: str) -> int | None:
