@@ -111,9 +111,11 @@ class MainWindow(QMainWindow):
         layout.addLayout(top)
         top.setSpacing(10)
 
-        top.addWidget(QLabel("Mã receive_inventories:"))
+        lbl = QLabel("Mã / ID phiếu nhập:")
+        lbl.setToolTip("Gọi GET /admin/receive_inventories/{id hoặc mã}.json — có thể nhập ID số (982245) hoặc mã REI…")
+        top.addWidget(lbl)
         self.code_input = QLineEdit()
-        self.code_input.setPlaceholderText("Ví dụ: RI000123 hoặc mã bạn nhập")
+        self.code_input.setPlaceholderText("Ví dụ: 982245 hoặc REI00497")
         self.code_input.returnPressed.connect(self.on_fetch)
         top.addWidget(self.code_input, 1)
 
@@ -152,12 +154,12 @@ class MainWindow(QMainWindow):
 
         bottom.addStretch(1)
 
-        bottom.addWidget(QLabel("2 QR/tem:"))
+        bottom.addWidget(QLabel("2 tem/trang:"))
         self.two_up = QSpinBox()
         self.two_up.setMinimum(0)
         self.two_up.setMaximum(1)
         self.two_up.setValue(1)
-        self.two_up.setToolTip("1 = chia đôi tem, in 2 QR giống nhau trên 1 tem")
+        self.two_up.setToolTip("1 = một khổ 72×22mm in 2 tem (trái/phải), mỗi tem 1 QR theo SKU")
         bottom.addWidget(self.two_up)
 
         self._last_pdf: Path | None = None
@@ -198,10 +200,12 @@ class MainWindow(QMainWindow):
         self.status_lbl.setText("Đang gọi API…")
         QApplication.processEvents()
         try:
-            items, strategy = self._client.get_receive_inventory(code)
+            items, strategy, api_url = self._client.get_receive_inventory(code)
             self._last_strategy = strategy
             self._set_rows(items)
-            self.status_lbl.setText(f"Tải OK: {len(items)} dòng. Auth strategy: {strategy}")
+            self.status_lbl.setText(
+                f"Tải OK: {len(items)} dòng sản phẩm (SKU / Tên / SL). {api_url} — auth: {strategy}"
+            )
         except Exception as e:
             self.status_lbl.setText("Lỗi.")
             QMessageBox.critical(self, "Lỗi gọi API", str(e))
@@ -228,7 +232,6 @@ class MainWindow(QMainWindow):
         for st in self._rows:
             if st.print_qty <= 0:
                 continue
-            # mỗi quantity = 1 tem (1 page)
             for _ in range(st.print_qty):
                 rows_to_print.append(LabelRow(name=st.item.name, sku=st.item.sku))
 
@@ -236,20 +239,24 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Không có tem", "Tất cả dòng đều có số lượng in = 0.")
             return
 
+        two_up = self.two_up.value() == 1
         try:
             generate_labels_pdf(
                 rows_to_print,
                 out_path,
                 page_w_mm=72.0,
                 page_h_mm=22.0,
-                two_up=(self.two_up.value() == 1),
+                two_up=two_up,
             )
             self._last_pdf = Path(out_path)
             self.open_btn.setEnabled(True)
+            n_tem = len(rows_to_print)
+            n_trang = (n_tem + 1) // 2 if two_up else n_tem
             QMessageBox.information(
                 self,
                 "Xuất PDF xong",
-                f"Đã tạo: {out_path}\nSố tem: {len(rows_to_print)}",
+                f"Đã tạo: {out_path}\nSố tem: {n_tem}\nSố trang PDF: {n_trang}"
+                + (" (2 tem/trang)" if two_up else ""),
             )
         except Exception as e:
             QMessageBox.critical(self, "Lỗi xuất PDF", str(e))

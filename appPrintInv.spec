@@ -35,5 +35,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['assets\\app.ico'],
+    icon=['C:\\Users\\ADMIN\\appPrintInv\\assets\\app.ico'],
 )

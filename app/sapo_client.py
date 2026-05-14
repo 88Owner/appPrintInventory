@@ -49,15 +49,60 @@ def _extract_receive_inventory_code(payload: Any) -> str | None:
     return None
 
 
-def _coerce_item(obj: dict[str, Any]) -> ReceiveInventoryItem | None:
-    sku = (obj.get("sku") or obj.get("SKU") or "").strip()
-    name = (obj.get("name") or obj.get("product_name") or obj.get("title") or "").strip()
-
-    qty_raw = obj.get("quantity")
+def _as_int(v: Any) -> int | None:
     try:
-        quantity = int(qty_raw)
+        if v is None:
+            return None
+        if isinstance(v, bool):
+            return None
+        if isinstance(v, int):
+            return v
+        if isinstance(v, float):
+            return int(v)
+        s = str(v).strip()
+        if not s:
+            return None
+        return int(float(s))
     except Exception:
-        quantity = 0
+        return None
+
+
+def _coerce_item(obj: dict[str, Any]) -> ReceiveInventoryItem | None:
+    variant = obj.get("variant") if isinstance(obj.get("variant"), dict) else {}
+    product = obj.get("product") if isinstance(obj.get("product"), dict) else {}
+
+    sku = (
+        (obj.get("sku") or obj.get("SKU") or variant.get("sku") or product.get("sku") or "")
+    )
+    sku = str(sku).strip()
+
+    name = (
+        obj.get("name")
+        or obj.get("product_name")
+        or obj.get("title")
+        or obj.get("variant_title")
+        or variant.get("title")
+        or product.get("name")
+        or product.get("title")
+    )
+    name = str(name).strip()
+
+    # Some payloads split title across product + variant
+    if product and isinstance(product.get("name"), str) and isinstance(variant.get("title"), str):
+        pn = str(product.get("name")).strip()
+        vt = str(variant.get("title")).strip()
+        if pn and vt and vt.lower() not in pn.lower():
+            name = f"{pn} {vt}".strip()
+
+    qty_raw = (
+        obj.get("quantity")
+        or obj.get("qty")
+        or obj.get("line_quantity")
+        or obj.get("received_quantity")
+        or obj.get("accept_quantity")
+        or obj.get("amount")
+    )
+    quantity = _as_int(qty_raw) or 0
 
     if not sku and not name:
         return None
@@ -68,7 +113,17 @@ def _extract_items(payload: Any) -> list[ReceiveInventoryItem]:
     # Heuristic parsing because exact shape may differ by Sapo version.
     candidates: list[Any] = []
     if isinstance(payload, dict):
-        for key in ("items", "line_items", "products", "receive_inventory_items", "receive_inventory_details", "details"):
+        for key in (
+            "items",
+            "line_items",
+            "products",
+            "receive_inventory_items",
+            "receive_inventory_lines",
+            "receive_inventory_line_items",
+            "receive_inventory_details",
+            "receive_lines",
+            "details",
+        ):
             if key in payload:
                 candidates.append(payload[key])
         # sometimes nested
@@ -182,7 +237,11 @@ class SapoClient:
             return None, ""
         return None, ""
 
-    def get_receive_inventory(self, marec: str) -> tuple[list[ReceiveInventoryItem], str]:
+    def get_receive_inventory(self, marec: str) -> tuple[list[ReceiveInventoryItem], str, str]:
+        """
+        Trả về: (danh_sách_dòng, auth_strategy, url_đã_gọi).
+        url_đã_gọi dùng để hiển thị trên UI (GET .../admin/receive_inventories/{id}.json).
+        """
         marec = marec.strip()
         if not marec:
             raise ValueError("Mã receive_inventories đang trống.")
@@ -190,11 +249,12 @@ class SapoClient:
         # If user types code like REI00497, try to resolve to numeric id.
         id_or_raw = marec
         if not marec.isdigit():
-            resolved_id, strat = self._resolve_id_by_code(marec)
+            resolved_id, _strat = self._resolve_id_by_code(marec)
             if resolved_id is not None:
                 id_or_raw = str(resolved_id)
 
         path = f"/admin/receive_inventories/{id_or_raw}.json"
+        full_url = f"{self._cfg.base_url}{path}"
 
         resp, strat = self._attempt_get(path)
         if resp.status_code == 200:
@@ -208,7 +268,7 @@ class SapoClient:
                     "API OK nhưng không parse được danh sách sản phẩm.\n"
                     f"id={rid} code={rcode} strategy={strat}"
                 )
-            return items, strat
+            return items, strat, full_url
 
         raise SapoApiError(f"HTTP {resp.status_code}: {resp.text[:800]}")
 

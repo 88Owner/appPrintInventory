@@ -189,8 +189,8 @@ def generate_labels_pdf(
     two_up: bool = True,
 ) -> None:
     """
-    1 page = 1 tem 72x22mm.
-    two_up=True: chia đôi chiều ngang, in 2 tem trên cùng 1 trang (trái/phải).
+    1 page = 1 khổ 72x22mm.
+    two_up=True: một khổ in 2 tem (trái/phải), mỗi tem một QR theo SKU.
     """
     page_w = page_w_mm * mm
     page_h = page_h_mm * mm
