@@ -65,6 +65,14 @@ def _qr_png_bytes(value: str) -> bytes:
     return out.getvalue()
 
 
+def _normalize_product_name(name: str) -> str:
+    """Bỏ phần sau dấu '+' (thường là ghi chú/biến thể phụ), gọn khoảng trắng."""
+    s = (name or "").strip()
+    if "+" in s:
+        s = s.split("+", 1)[0].strip()
+    return " ".join(s.split())
+
+
 def _fit_text(c: canvas.Canvas, text: str, max_width_pt: float, font: str, size: int) -> str:
     text = " ".join((text or "").split())
     if not text:
@@ -87,15 +95,42 @@ def _fit_text(c: canvas.Canvas, text: str, max_width_pt: float, font: str, size:
 
 
 def _wrap_words(c: canvas.Canvas, text: str, max_width_pt: float, font: str, size: int) -> list[str]:
+    """Xuống dòng theo từ — không cắt bằng ellipsis; từ quá dài thì tách theo ký tự."""
     text = " ".join((text or "").split())
     if not text:
         return []
+
+    def _flush(cur: list[str]) -> None:
+        if cur:
+            lines.append(" ".join(cur))
+
+    def _emit_char_chunks(word: str) -> list[str]:
+        chunks: list[str] = []
+        chunk = ""
+        for ch in word:
+            trial = chunk + ch
+            if c.stringWidth(trial, font, size) <= max_width_pt:
+                chunk = trial
+            else:
+                if chunk:
+                    chunks.append(chunk)
+                chunk = ch
+        if chunk:
+            chunks.append(chunk)
+        return chunks
 
     words = text.split(" ")
     lines: list[str] = []
     cur: list[str] = []
 
     for w in words:
+        if c.stringWidth(w, font, size) > max_width_pt:
+            _flush(cur)
+            cur = []
+            for piece in _emit_char_chunks(w):
+                lines.append(piece)
+            continue
+
         trial = (" ".join(cur + [w])).strip()
         if not cur:
             cur = [w]
@@ -103,11 +138,10 @@ def _wrap_words(c: canvas.Canvas, text: str, max_width_pt: float, font: str, siz
         if c.stringWidth(trial, font, size) <= max_width_pt:
             cur.append(w)
         else:
-            lines.append(" ".join(cur))
+            _flush(cur)
             cur = [w]
 
-    if cur:
-        lines.append(" ".join(cur))
+    _flush(cur)
     return lines
 
 
@@ -134,50 +168,32 @@ def _looks_like_count_phrase(w1: str, w2: str) -> bool:
 
 
 def _split_name_lines(c: canvas.Canvas, name: str, max_width_pt: float, font: str, size: int) -> list[str]:
-    clean = " ".join((name or "").split())
+    """Tách tên thành các dòng đầy đủ (không dùng …)."""
+    clean = _normalize_product_name(name)
     if not clean:
         return []
 
     words = clean.split(" ")
 
-    # Rule A: "1 lớp 1mx0,7m Caro Nâu" => ["1 lớp", "1mx0,7m", "Caro Nâu"]
+    # Rule A: "1 lớp 1mx0,7m Caro Nâu" / "Xương Rồng Xanh Lá" sau size
     if len(words) >= 4 and _looks_like_count_phrase(words[0], words[1]) and _looks_like_variant_token(words[2]):
         l1 = " ".join(words[:2])
         l2 = words[2]
-        l3 = " ".join(words[3:])
-        return [
-            _fit_text(c, l1, max_width_pt, font, size),
-            _fit_text(c, l2, max_width_pt, font, size),
-            _fit_text(c, l3, max_width_pt, font, size),
-        ]
+        tail = " ".join(words[3:])
+        out = [l1, l2]
+        out.extend(_wrap_words(c, tail, max_width_pt, font, size))
+        return [ln for ln in out if ln]
 
-    # Rule B: "Rido 2mx2m25 Vương Miệng" or "Ore 10x20 ABC" => ["Rido", "2mx2m25", "Vương Miệng"]
-    # (Chuẩn hóa giống format "1 lớp")
+    # Rule B: "Rido 2mx2m25 Vương Miệng Xanh Lá" => brand, size, phần tên còn lại (có thể nhiều dòng)
     if len(words) >= 3 and _looks_like_variant_token(words[1]):
         l1 = words[0]
         l2 = words[1]
-        l3 = " ".join(words[2:])
-        return [
-            _fit_text(c, l1, max_width_pt, font, size),
-            _fit_text(c, l2, max_width_pt, font, size),
-            _fit_text(c, l3, max_width_pt, font, size),
-        ]
+        tail = " ".join(words[2:])
+        out = [l1, l2]
+        out.extend(_wrap_words(c, tail, max_width_pt, font, size))
+        return [ln for ln in out if ln]
 
-    # Otherwise: wrap and take first 2 lines
-    wrapped = _wrap_words(c, clean, max_width_pt, font, size)
-    if not wrapped:
-        return []
-    # Keep up to 3 lines for name; compress remainder into last line with ellipsis if needed.
-    if len(wrapped) <= 3:
-        return [ln for ln in wrapped if ln]
-    l1 = wrapped[0]
-    l2 = wrapped[1]
-    l3 = " ".join(wrapped[2:])
-    return [
-        _fit_text(c, l1, max_width_pt, font, size),
-        _fit_text(c, l2, max_width_pt, font, size),
-        _fit_text(c, l3, max_width_pt, font, size),
-    ]
+    return [ln for ln in _wrap_words(c, clean, max_width_pt, font, size) if ln]
 
 
 def generate_labels_pdf(
@@ -209,7 +225,8 @@ def generate_labels_pdf(
     def draw_one(label: LabelRow, *, x0: float, y0: float) -> None:
         # Layout: QR left, text right (tối đa 3 dòng name + 1 dòng sku)
         inner_h = page_h - 2 * pad_y
-        qr_size = min(18.0 * mm, inner_h)  # square
+        # QR nhỏ hơn một chút để vùng chữ rộng hơn (tên dài dễ fit)
+        qr_size = min(15.0 * mm, inner_h)
         inner_y = y0
 
         qr_x = x0
@@ -238,20 +255,26 @@ def generate_labels_pdf(
             mask="auto",
         )
 
+        display_name = _normalize_product_name(label.name)
         base_size = 7
-        min_size = 4
-        line_gap = 0.6 * mm
+        min_size = 3
+        line_gap = 0.4 * mm
 
+        def _sku_lines(sz: int) -> list[str]:
+            wrapped = _wrap_words(c, label.sku, text_w, sku_font, sz)
+            if wrapped:
+                return wrapped
+            return [_fit_text(c, label.sku, text_w, sku_font, sz)]
+
+        drew = False
         for size in range(base_size, min_size - 1, -1):
-            name_lines = _split_name_lines(c, label.name, text_w, name_font, size)
-            name_lines = [ln for ln in name_lines if ln][:3]
+            name_lines = _split_name_lines(c, display_name, text_w, name_font, size)
             if not name_lines:
                 name_lines = [""]
+            sku_lines = _sku_lines(size)
+            all_lines = name_lines + sku_lines
 
-            sku_line = _fit_text(c, label.sku, text_w, sku_font, size)
-            lines = name_lines + [sku_line]
-
-            total_h = len(lines) * size + (len(lines) - 1) * line_gap
+            total_h = len(all_lines) * size + (len(all_lines) - 1) * line_gap
             if total_h <= inner_h + 0.1:
                 y_top = inner_y + inner_h - (inner_h - total_h) / 2
                 y = y_top - size
@@ -262,8 +285,28 @@ def generate_labels_pdf(
                     y -= (size + line_gap)
 
                 c.setFont(sku_font, size)
-                c.drawString(text_x, y, sku_line)
+                for ln in sku_lines:
+                    c.drawString(text_x, y, ln)
+                    y -= (size + line_gap)
+                drew = True
                 break
+
+        if not drew:
+            size = min_size
+            name_lines = _split_name_lines(c, display_name, text_w, name_font, size) or [""]
+            sku_lines = _sku_lines(size)
+            all_lines = name_lines + sku_lines
+            total_h = len(all_lines) * size + (len(all_lines) - 1) * line_gap
+            y_top = inner_y + inner_h - (inner_h - total_h) / 2
+            y = y_top - size
+            c.setFont(name_font, size)
+            for ln in name_lines:
+                c.drawString(text_x, y, ln)
+                y -= (size + line_gap)
+            c.setFont(sku_font, size)
+            for ln in sku_lines:
+                c.drawString(text_x, y, ln)
+                y -= (size + line_gap)
 
     rows_list = list(rows)
     i = 0
