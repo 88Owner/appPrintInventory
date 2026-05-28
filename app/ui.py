@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QIcon, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -45,7 +45,7 @@ def _rid_from_detail_url(url: str) -> int | None:
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("In tem 72x22 - Receive Inventories (đã nhận)")
+        self.setWindowTitle("In tem 72x22 - Receive Inventories")
         self.resize(1100, 720)
 
         cfg_path = default_config_path()
@@ -57,6 +57,8 @@ class MainWindow(QMainWindow):
 
         self._cfg = load_config(cfg_path)
         self._client = SapoClient(self._cfg)
+        self._list_status = "received"
+        self._list_status_label = "đơn đã nhận"
 
         self._pending_summaries: list[ReceiveInventorySummary] = []
         self._detail_cache: dict[int, list[ReceiveInventoryItem]] = {}
@@ -64,6 +66,7 @@ class MainWindow(QMainWindow):
         self._recv_print: dict[int, bool] = {}
         self._last_pdf: Path | None = None
         self._loading_detail_rid: int | None = None
+        self._mode_menu_actions: dict[str, QAction] = {}
 
         root = QWidget()
         self.setCentralWidget(root)
@@ -130,20 +133,19 @@ class MainWindow(QMainWindow):
             QSplitter::handle { background: #22304a; height: 4px; }
             """
         )
+        self._setup_menu()
 
         top = QHBoxLayout()
         layout.addLayout(top)
         top.setSpacing(10)
 
         self.refresh_btn = QPushButton("Refresh")
-        self.refresh_btn.setToolTip(
-            "Tải lại danh sách receive_inventories đã nhận (receipt_status = received). Phím tắt: F5"
-        )
+        self.refresh_btn.setToolTip("Tải lại danh sách theo chế độ menu hiện tại. Phím tắt: F5")
         self.refresh_btn.clicked.connect(self.refresh_pending_list)
         top.addWidget(self.refresh_btn)
 
         self.refresh_in_group_btn = QPushButton("Refresh")
-        self.refresh_in_group_btn.setToolTip("Tải lại danh sách phiếu đã nhận (received) từ API")
+        self.refresh_in_group_btn.setToolTip("Tải lại danh sách theo chế độ menu hiện tại")
         self.refresh_in_group_btn.clicked.connect(self.refresh_pending_list)
 
         top.addWidget(QLabel("Mã / ID nhanh:"))
@@ -168,10 +170,10 @@ class MainWindow(QMainWindow):
         splitter = QSplitter(Qt.Vertical)
         layout.addWidget(splitter, 1)
 
-        grp_pending = QGroupBox("Phiếu đã nhận hàng (receipt_status = received)")
+        grp_pending = QGroupBox("Danh sách phiếu theo chế độ")
         gl = QVBoxLayout(grp_pending)
         pending_hdr = QHBoxLayout()
-        pending_hdr.addWidget(QLabel("Chỉ phiếu đã nhận (received). Ô Mã/ID nhanh: mọi trạng thái."))
+        pending_hdr.addWidget(QLabel("Ô Mã/ID nhanh: mở chi tiết mọi trạng thái. Danh sách: theo menu chức năng."))
         pending_hdr.addStretch(1)
         pending_hdr.addWidget(self.refresh_in_group_btn)
         gl.addLayout(pending_hdr)
@@ -270,12 +272,41 @@ class MainWindow(QMainWindow):
         self.refresh_btn.setEnabled(enabled)
         self.refresh_in_group_btn.setEnabled(enabled)
 
+    def _setup_menu(self) -> None:
+        menu = self.menuBar().addMenu("Chức năng")
+
+        act_received = QAction("In đơn (status: received)", self)
+        act_received.setCheckable(True)
+        act_received.triggered.connect(lambda: self._switch_list_mode("received", "đơn đã nhận"))
+        menu.addAction(act_received)
+
+        act_pending = QAction("In hàng ngày (status: pending)", self)
+        act_pending.setCheckable(True)
+        act_pending.triggered.connect(lambda: self._switch_list_mode("pending", "đơn hàng ngày"))
+        menu.addAction(act_pending)
+
+        self._mode_menu_actions = {
+            "received": act_received,
+            "pending": act_pending,
+        }
+        self._sync_mode_menu_checks()
+
+    def _sync_mode_menu_checks(self) -> None:
+        for status, action in self._mode_menu_actions.items():
+            action.setChecked(status == self._list_status)
+
+    def _switch_list_mode(self, status: str, label: str) -> None:
+        self._list_status = status
+        self._list_status_label = label
+        self._sync_mode_menu_checks()
+        self.refresh_pending_list()
+
     def refresh_pending_list(self) -> None:
         self._set_refresh_enabled(False)
-        self.status_lbl.setText("Đang tải danh sách phiếu đã nhận (received)…")
+        self.status_lbl.setText(f"Đang tải danh sách {self._list_status_label} ({self._list_status})…")
         QApplication.processEvents()
         try:
-            rows, strategy, base_url = self._client.list_received_receive_inventories()
+            rows, strategy, base_url = self._client.list_receive_inventories_by_status(self._list_status)
             # Dữ liệu mới: bỏ cache chi tiết, tick in, và bảng chi tiết cũ
             self._detail_cache.clear()
             self._line_prefs.clear()
@@ -287,7 +318,7 @@ class MainWindow(QMainWindow):
             self._pending_summaries = rows
             self._fill_pending_table()
             self.status_lbl.setText(
-                f"Đã tải {len(rows)} phiếu đã nhận (received)."
+                f"Đã tải {len(rows)} phiếu {self._list_status_label} ({self._list_status}). {base_url} — auth: {strategy}"
             )
         except Exception as e:
             self.status_lbl.setText("Lỗi tải danh sách.")
@@ -428,8 +459,8 @@ class MainWindow(QMainWindow):
             if not found:
                 QMessageBox.information(
                     self,
-                    "Phiếu không nằm trong danh sách đã nhận",
-                    "Chi tiết vẫn hiển thị bên dưới. Phiếu này có thể chưa received hoặc không còn trong danh sách lọc.",
+                    "Phiếu không nằm trong danh sách hiện tại",
+                    f"Chi tiết vẫn hiển thị bên dưới. Phiếu này có thể không thuộc status={self._list_status}.",
                 )
         except Exception as e:
             self.status_lbl.setText("Lỗi.")

@@ -283,18 +283,22 @@ class SapoClient:
 
         raise SapoApiError(f"HTTP {resp.status_code}: {resp.text[:800]}")
 
-    def list_received_receive_inventories(self) -> tuple[list[ReceiveInventorySummary], str, str]:
+    def list_receive_inventories_by_status(self, receipt_status: str) -> tuple[list[ReceiveInventorySummary], str, str]:
         """
-        Danh sách đầy đủ trên app: chỉ phiếu có receipt_status == received
-        (thử query receipt_status=received; nếu API không lọc thì lọc phía client).
+        Lấy danh sách phiếu theo receipt_status.
+        (thử query receipt_status=<value>; nếu API không lọc thì lọc phía client).
         Trả về: (danh_sách, auth_strategy, url_gốc).
         """
+        target_status = str(receipt_status or "").strip().lower()
+        if not target_status:
+            raise ValueError("receipt_status đang trống.")
+
         path = "/admin/receive_inventories.json"
         base_url = f"{self._cfg.base_url}{path}"
 
         param_variants: list[dict[str, Any]] = [
-            {"limit": 250, "page": 1, "receipt_status": "received"},
-            {"limit": 250, "page": 1, "status": "received"},
+            {"limit": 250, "page": 1, "receipt_status": target_status},
+            {"limit": 250, "page": 1, "status": target_status},
             {"limit": 250, "page": 1},
         ]
 
@@ -330,7 +334,7 @@ class SapoClient:
                 summ = _summary_from_row(obj)
                 if summ is None:
                     continue
-                if str(summ.receipt_status).strip().lower() != "received":
+                if str(summ.receipt_status).strip().lower() != target_status:
                     continue
                 merged[summ.id] = summ
             if len(raw) < limit:
@@ -339,6 +343,12 @@ class SapoClient:
 
         items = sorted(merged.values(), key=lambda s: s.id, reverse=True)
         return items, strategy, base_url
+
+    def list_received_receive_inventories(self) -> tuple[list[ReceiveInventorySummary], str, str]:
+        return self.list_receive_inventories_by_status("received")
+
+    def list_pending_receive_inventories(self) -> tuple[list[ReceiveInventorySummary], str, str]:
+        return self.list_receive_inventories_by_status("pending")
 
 
 def _iter_receive_inventory_list_dicts(payload: Any) -> list[dict[str, Any]]:
